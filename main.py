@@ -147,6 +147,11 @@ def main():
     )
     
     # Filtrer les données
+    # Charger le meilleur détecteur pour le filtrage
+    if os.path.exists("poison_detector_best.pth"):
+        poison_detector.load_detector("poison_detector_best.pth")
+        print("✓ Meilleur détecteur chargé pour le filtrage")
+        
     clean_data = poison_detector.filter_clean_data(attacked_loader)
     
     # Étape 6: Apprentissage fédéré avec données propres

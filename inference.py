@@ -23,13 +23,22 @@ class InferenceSystem:
         
         self.model.eval()
         
-        # Charger le détecteur d'attaques
-        self.poison_detector = PoisonDetector(self.model)
-        if os.path.exists(detector_path):
-            self.poison_detector.load_detector(detector_path)
-            print(f"✓ Détecteur chargé depuis {detector_path}")
+        # Charger le détecteur d'attaques - prioriser la version "best"
+        best_detector_path = detector_path.replace(".pth", "_best.pth")
+        
+        if os.path.exists(best_detector_path):
+            real_path = best_detector_path
+            print(f"✓ Meilleur détecteur trouvé: {real_path}")
+        elif os.path.exists(detector_path):
+            real_path = detector_path
+            print(f"✓ Détecteur standard trouvé: {real_path}")
         else:
-            print(f"⚠️ Fichier {detector_path} non trouvé")
+            real_path = None
+            print(f"⚠️ Aucun fichier de détecteur trouvé ({detector_path} ou {best_detector_path})")
+            
+        self.poison_detector = PoisonDetector(self.model)
+        if real_path:
+            self.poison_detector.load_detector(real_path)
         
         # Transformation pour les images
         self.transform = transforms.Compose([
