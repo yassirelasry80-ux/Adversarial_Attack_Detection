@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 from app.config import Config
-from app.models.classifier import get_poison_detector
+from app.models.classifier import get_poison_detector, get_autoencoder
 
 class PoisonDetector:
     """
@@ -205,3 +205,200 @@ class PoisonDetector:
         self.detector.load_state_dict(checkpoint['detector_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         print(f"✓ Détecteur chargé depuis {path}")
+
+class AutoEncoderDetector:
+    """
+    Détecteur d'attaques basé sur un AutoEncodeur (Approche Non-Supervisée)
+    Principe: L'AutoEncodeur apprend à reconstruire les images propres.
+    Les images adversariales auront une erreur de reconstruction (MSE) plus élevée.
+    """
+    
+    def __init__(self):
+        self.detector = get_autoencoder()
+        self.criterion = nn.MSELoss()
+        self.optimizer = optim.Adam(self.detector.parameters(), lr=0.001)
+        # Seuil par défaut, sera calibré après l'entraînement
+        self.threshold = 0.05 
+        
+    def train_detector(self, train_data, val_data=None, epochs=10):
+        """
+        Entraîner l'AutoEncodeur UNIQUEMENT sur les données propres
+        
+        Args:
+            train_data: Liste de tuples (image, label, is_adversarial)
+            val_data: Liste de tuples pour la validation
+            epochs: Nombre d'époques
+        """
+        print("\n🔍 Entraînement de l'AutoEncodeur (Détection d'anomalies)...")
+        
+        # Filtrer pour ne garder que les images propres (is_adversarial == 0)
+        # Contrairement au classifieur supervisé qui a besoin des deux classes
+        clean_train_data = [item for item in train_data if item[2] == 0]
+        
+        if len(clean_train_data) == 0:
+            print("⚠️ AVERTISSEMENT: Aucune donnée propre trouvée pour l'entraînement!")
+            return
+            
+        print(f"ℹ️ Entraînement sur {len(clean_train_data)} images propres uniquement")
+        
+        best_loss = float('inf')
+        
+        for epoch in range(epochs):
+            self.detector.train()
+            total_loss = 0
+            num_batches = 0
+            
+            # Mélanger
+            import random
+            random.shuffle(clean_train_data)
+            
+            # Batcher manuellement comme avant
+            batch_size = Config.BATCH_SIZE
+            num_batches_total = len(clean_train_data) // batch_size
+            
+            progress_bar = tqdm(range(num_batches_total), desc=f"Epoch {epoch+1}/{epochs} [AE Train]")
+            
+            for batch_idx in progress_bar:
+                batch_start = batch_idx * batch_size
+                batch_end = batch_start + batch_size
+                batch = clean_train_data[batch_start:batch_end]
+                
+                images = torch.cat([item[0] for item in batch]).to(Config.DEVICE)
+                
+                # Forward pass - Reconstruction
+                reconstructed = self.detector(images)
+                loss = self.criterion(reconstructed, images)
+                
+                # Backward pass
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+                
+                total_loss += loss.item()
+                num_batches += 1
+                
+                progress_bar.set_postfix({'mse_loss': f'{loss.item():.6f}'})
+            
+            avg_loss = total_loss / max(1, num_batches)
+            print(f"Epoch {epoch+1}: Train MSE Loss = {avg_loss:.6f}")
+            
+            # Validation (aussi sur données propres pour vérifier la convergence)
+            if val_data:
+                self.detector.eval()
+                val_loss = 0
+                val_batches = 0
+                
+                clean_val_data = [item for item in val_data if item[2] == 0]
+                val_num_iters = len(clean_val_data) // batch_size
+                
+                with torch.no_grad():
+                    for i in range(val_num_iters):
+                        start = i * batch_size
+                        end = start + batch_size
+                        batch = clean_val_data[start:end]
+                        images = torch.cat([item[0] for item in batch]).to(Config.DEVICE)
+                        
+                        recon = self.detector(images)
+                        loss = self.criterion(recon, images)
+                        val_loss += loss.item()
+                        val_batches += 1
+                
+                avg_val_loss = val_loss / max(1, val_batches)
+                print(f"Epoch {epoch+1}: Val MSE Loss = {avg_val_loss:.6f}")
+                
+                if avg_val_loss < best_loss:
+                    best_loss = avg_val_loss
+                    self.save_detector("autoencoder_best.pth")
+                    print(f"✓ Meilleur modèle sauvegardé (Loss: {best_loss:.6f})")
+                    
+        # Calibrage du seuil à la fin de l'entraînement
+        # 1. Charger les meilleurs poids pour la calibration
+        self.load_detector("autoencoder_best.pth")
+        
+        # 2. Calibrer le seuil avec ces meilleurs poids
+        self.calibrate_threshold(clean_train_data)
+        
+        # 3. Resauvegarder le meilleur modèle AVEC le bon seuil
+        self.save_detector("autoencoder_best.pth")
+        print("✓ Seuil calibré sauvegardé dans autoencoder_best.pth")
+
+    def calibrate_threshold(self, clean_data):
+        """Définir le seuil basé sur l'erreur max de reconstruction des données propres + marge"""
+        self.detector.eval()
+        print("\n📏 Calibrage du seuil de détection...")
+        
+        errors = []
+        batch_size = Config.BATCH_SIZE
+        num_batches = len(clean_data) // batch_size
+        
+        with torch.no_grad():
+            for i in tqdm(range(num_batches), desc="Calcul erreurs"):
+                batch = clean_data[i*batch_size:(i+1)*batch_size]
+                images = torch.cat([item[0] for item in batch]).to(Config.DEVICE)
+                recon = self.detector(images)
+                
+                # Erreur par image (pas moyenne du batch)
+                loss_per_image = torch.mean((images - recon)**2, dim=[1, 2, 3])
+                errors.extend(loss_per_image.cpu().numpy())
+        
+        import numpy as np
+        mean_error = np.mean(errors)
+        std_error = np.std(errors)
+        # Seuil = Moyenne + 3 * Ecart-type (couvre 99.7% des données normales si gaussien)
+        self.threshold = mean_error + 3 * std_error
+        
+        print(f"✓ Seuil calibré: {self.threshold:.6f} (Moyenne: {mean_error:.6f}, Std: {std_error:.6f})")
+        
+    def detect_poison(self, images, threshold=None):
+        """
+        Détecter si des images sont mauvaises (erreur de reconstruction élevée)
+        """
+        if threshold is None:
+            threshold = self.threshold
+            
+        self.detector.eval()
+        with torch.no_grad():
+            reconstructed = self.detector(images)
+            # Erreur quadratique moyenne par image
+            mse_per_image = torch.mean((images - reconstructed)**2, dim=[1, 2, 3])
+            
+            is_poisoned = mse_per_image > threshold
+            
+        return is_poisoned, mse_per_image
+
+    def filter_clean_data(self, dataloader, output_path=Config.CLEAN_DATA_PATH):
+        # Utilise la même logique que PoisonDetector mais appelle son propre detect_poison
+        print("\n🧹 Filtrage avec AutoEncodeur...")
+        clean_data = []
+        total = 0
+        poisoned = 0
+        
+        self.detector.eval()
+        for images, labels in tqdm(dataloader, desc="Filtrage AE"):
+            images = images.to(Config.DEVICE)
+            is_poisoned, _ = self.detect_poison(images)
+            
+            for i in range(len(images)):
+                total += 1
+                if not is_poisoned[i]:
+                    clean_data.append((images[i].cpu(), labels[i].cpu()))
+                else:
+                    poisoned += 1
+                    
+        print(f"✓ (AE) Filtrage terminé: {poisoned}/{total} images rejetées")
+        return clean_data
+
+    def save_detector(self, path="autoencoder.pth"):
+        torch.save({
+            'detector_state_dict': self.detector.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'threshold': self.threshold
+        }, path)
+        print(f"✓ AutoEncodeur sauvegardé dans {path}")
+
+    def load_detector(self, path="autoencoder.pth"):
+        checkpoint = torch.load(path, map_location=Config.DEVICE)
+        self.detector.load_state_dict(checkpoint['detector_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.threshold = checkpoint.get('threshold', 0.05)
+        print(f"✓ AutoEncodeur chargé depuis {path} (Seuil: {self.threshold:.6f})")

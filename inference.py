@@ -12,34 +12,49 @@ class InferenceSystem:
     Système d'inférence pour détecter les attaques et classifier les images
     """
     
-    def __init__(self, model_path="global_model_final.pth", detector_path="poison_detector.pth"):
+    def __init__(self, model_path=None, detector_path=None, detector_type="supervised"):
+        # Déterminer le chemin du modèle global selon la méthode
+        if model_path is None:
+            if detector_type == "supervised":
+                model_path = "global_model_supervised.pth"
+            else:
+                model_path = "global_model_autoencoder.pth"
+        
         # Charger le modèle de classification
         self.model = get_model(pretrained=False)
         if os.path.exists(model_path):
             self.model.load_state_dict(torch.load(model_path, map_location=Config.DEVICE))
-            print(f"✓ Modèle chargé depuis {model_path}")
+            print(f"✓ Modèle global chargé depuis {model_path} ({detector_type})")
         else:
             print(f"⚠️ Fichier {model_path} non trouvé, utilisation du modèle pré-entraîné")
+            # Essayons le fallback sur le nom générique
+            if os.path.exists("global_model_final.pth"):
+                self.model.load_state_dict(torch.load("global_model_final.pth", map_location=Config.DEVICE))
+                print(f"⚠️ Replis sur global_model_final.pth")
         
         self.model.eval()
         
-        # Charger le détecteur d'attaques - prioriser la version "best"
-        best_detector_path = detector_path.replace(".pth", "_best.pth")
+        # Charger le détecteur d'attaques
+        self.detector_type = detector_type
         
-        if os.path.exists(best_detector_path):
-            real_path = best_detector_path
-            print(f"✓ Meilleur détecteur trouvé: {real_path}")
-        elif os.path.exists(detector_path):
-            real_path = detector_path
-            print(f"✓ Détecteur standard trouvé: {real_path}")
+        if detector_type == "supervised":
+            from app.models.detector import PoisonDetector
+            self.detector = PoisonDetector(self.model)
+            default_path = "poison_detector_best.pth"
         else:
-            real_path = None
-            print(f"⚠️ Aucun fichier de détecteur trouvé ({detector_path} ou {best_detector_path})")
+            from app.models.detector import AutoEncoderDetector
+            self.detector = AutoEncoderDetector()
+            default_path = "autoencoder_best.pth"
             
-        self.poison_detector = PoisonDetector(self.model)
-        if real_path:
-            self.poison_detector.load_detector(real_path)
+        # Déterminer le chemin du fichier
+        final_path = detector_path if detector_path else default_path
         
+        if os.path.exists(final_path):
+            self.detector.load_detector(final_path)
+            print(f"✓ Détecteur ({detector_type}) chargé depuis {final_path}")
+        else:
+            print(f"⚠️ Détecteur non trouvé: {final_path}")
+
         # Transformation pour les images
         self.transform = transforms.Compose([
             transforms.Resize((Config.IMG_SIZE, Config.IMG_SIZE)),
@@ -75,11 +90,21 @@ class InferenceSystem:
         
         # Vérifier si l'image est adversariale
         if check_adversarial:
-            is_poisoned, confidence = self.poison_detector.detect_poison(image_tensor)
+            # detect_poison retourne (is_poisoned, output_value)
+            # Pour supervisé: output_value = probabilité (0-1)
+            # Pour autoencodeur: output_value = erreur de reconstruction (MSE)
+            is_poisoned, output_val = self.detector.detect_poison(image_tensor)
             
-            # Correction : utiliser .item() directement pour scalaires 0-dim
             results['is_adversarial'] = bool(is_poisoned.item())
-            results['adversarial_confidence'] = float(confidence.item())
+            
+            # Normalisation du score pour l'affichage
+            if self.detector_type == "supervised":
+                results['adversarial_confidence'] = float(output_val.item())
+            else:
+                # Pour l'AE, l'output_val est l'erreur MSE. 
+                # On ne peut pas la convertir facilement en "confiance %", donc on garde la valeur brute
+                # ou on l'affiche différemment. Ici on met juste l'erreur.
+                results['adversarial_confidence'] = float(output_val.mean().item())
         
         # Faire la prédiction
         with torch.no_grad():

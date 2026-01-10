@@ -15,14 +15,27 @@ st.title("🛡️ Détection d'Attaques Adversariales")
 st.markdown("### Analyse de Radiographies Thoraciques")
 st.markdown("---")
 
-# Initialisation du système d'inférence (mis en cache pour la performance)
+# Sidebar pour la configuration
+st.sidebar.header("Configuration")
+detector_choice = st.sidebar.radio(
+    "Type de Détecteur:",
+    ("Supervisé (MLP)", "Auto-Encodeur")
+)
+
+# Mapper le choix vers le code interne
+detector_type = "supervised" if detector_choice == "Supervisé (MLP)" else "autoencoder"
+
+# Initialisation du système d'inférence (mis en cache avec l'argument pour recharger si ça change)
 @st.cache_resource
-def load_inference_system():
-    return InferenceSystem()
+def load_inference_system(dtype):
+    return InferenceSystem(detector_type=dtype)
 
 try:
-    inference = load_inference_system()
-    st.success("Système d'inférence chargé avec succès!")
+    inference = load_inference_system(detector_type)
+    st.sidebar.success(f"Système chargé ({detector_type})")
+except Exception as e:
+    st.error(f"Erreur lors du chargement du système: {e}")
+    st.stop()
 except Exception as e:
     st.error(f"Erreur lors du chargement du système: {e}")
     st.stop()
@@ -76,7 +89,7 @@ if uploaded_file is not None:
                 with col2:
                     st.subheader("Sécurité")
                     is_adv = result['is_adversarial']
-                    adv_conf = result['adversarial_confidence'] * 100
+                    raw_score = result['adversarial_confidence']
                     
                     if is_adv:
                         st.error("⚠️ **ATTAQUE DÉTECTÉE**")
@@ -85,7 +98,10 @@ if uploaded_file is not None:
                         st.success("🛡️ **Image Saine**")
                         st.markdown("Aucune modification malveillante détectée.")
                         
-                    st.metric("Score de détection", f"{adv_conf:.2f}%")
+                    if detector_type == "supervised":
+                        st.metric("Confiance Détection", f"{raw_score * 100:.2f}%")
+                    else:
+                        st.metric("Erreur Reconstruction (MSE)", f"{raw_score:.4f}")
 
             except Exception as e:
                 st.error(f"Erreur lors de l'analyse: {e}")

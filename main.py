@@ -6,9 +6,10 @@ from app.config import Config
 from app.data.loader import create_federated_datasets, get_dataloaders
 from app.models.classifier import get_model
 from app.attacks.adversarial import AdversarialAttacks
-from app.models.detector import PoisonDetector
+import argparse
+from app.models.detector import PoisonDetector, AutoEncoderDetector
+from torch.utils.data import DataLoader, ConcatDataset, TensorDataset
 from app.federated.learning import FederatedLearning
-from torch.utils.data import DataLoader, ConcatDataset
 
 def set_seed(seed=Config.RANDOM_SEED):
     """Fixer les seeds pour la reproductibilité"""
@@ -24,11 +25,18 @@ def print_header(text):
     print(f"  {text}")
     print(f"{'='*70}\n")
 
+
 def main():
+    parser = argparse.ArgumentParser(description='Adversarial Attack Detection')
+    parser.add_argument('--method', type=str, default='supervised', 
+                      choices=['supervised', 'autoencoder'],
+                      help='Method for detection: supervised or autoencoder')
+    args = parser.parse_args()
+
     # Configuration initiale
     set_seed()
     
-    print_header("🚀 SYSTÈME DE DÉTECTION D'ATTAQUES ADVERSARIALES")
+    print_header(f"🚀 SYSTÈME DE DÉTECTION D'ATTAQUES ADVERSARIALES ({args.method.upper()})")
     print(f"Device utilisé: {Config.DEVICE}")
     print(f"GPU disponible: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
@@ -107,106 +115,160 @@ def main():
     val_set = adversarial_train_data[split_idx:]
     print(f"✓ Split Train: {len(train_set)}, Val: {len(val_set)}")
     
-    # Étape 4: Entraînement du détecteur d'attaques
-    print_header("🔍 ÉTAPE 4: ENTRAÎNEMENT DU DÉTECTEUR")
+    # Étape 4: Entraînement et Comparaison des détecteurs
+    print_header("🔍 ÉTAPE 4: ENTRAÎNEMENT ET COMPARAISON DES DÉTECTEURS")
     
-    poison_detector = PoisonDetector(pretrained_model)
-    poison_detector.train_detector(train_set, val_data=val_set, epochs=10)
-    poison_detector.save_detector("poison_detector.pth")
+    # --- 1. Entraînement Supervisé ---
+    print("\n[1/2] Entraînement du Détecteur Supervisé (MLP)...")
+    detector_sup = PoisonDetector(pretrained_model)
+    detector_sup.train_detector(train_set, val_data=val_set, epochs=5) # Reduced epochs for speed
+    detector_sup.save_detector("poison_detector.pth")
     
-    # Étape 5: Filtrage des données empoisonnées
-    print_header("🧹 ÉTAPE 5: FILTRAGE DES DONNÉES")
+    # --- 2. Entraînement Auto-Encodeur ---
+    print("\n[2/2] Entraînement du Détecteur Auto-Encodeur...")
+    detector_ae = AutoEncoderDetector()
+    detector_ae.train_detector(train_set, val_data=val_set, epochs=5) # Reduced epochs for speed
+    detector_ae.save_detector("autoencoder.pth")
     
-    # Créer un loader avec des données potentiellement empoisonnées
-    # On utilise l'Hôpital 3 car les 1 et 2 ont servi à l'entraînement
-    poisoned_loader = DataLoader(
-        hospital_datasets[2],
-        batch_size=Config.BATCH_SIZE,
-        shuffle=False,
-        num_workers=2
-    )
+    # --- 3. Comparaison ---
+    print_header("📊 COMPARAISON DES PERFORMANCES")
     
-    # Générer des attaques sur ce dataset
-    print("Contamination du dataset avec des attaques...")
-    attacked_data = AdversarialAttacks.generate_adversarial_dataset(
-        pretrained_model,
-        poisoned_loader,
-        attack_type='pgd',
-        ratio=0.4
-    )
+    # Evaluation sur le set de validation (mixte)
+    print("Évaluation sur le dataset de validation mixte (Clean + Attacks)...")
     
-    # Créer un loader avec les données attaquées
-    from torch.utils.data import TensorDataset
-    attacked_images = torch.cat([item[0] for item in attacked_data])
-    attacked_labels = torch.tensor([item[1].item() for item in attacked_data])
-    attacked_dataset = TensorDataset(attacked_images, attacked_labels)
-    attacked_loader = DataLoader(
-        attacked_dataset,
-        batch_size=Config.BATCH_SIZE,
-        shuffle=False
-    )
-    
-    # Filtrer les données
-    # Charger le meilleur détecteur pour le filtrage
-    if os.path.exists("poison_detector_best.pth"):
-        poison_detector.load_detector("poison_detector_best.pth")
-        print("✓ Meilleur détecteur chargé pour le filtrage")
+    def evaluate_detector(det_model, val_data, name):
+        correct = 0
+        total = 0
         
-    clean_data = poison_detector.filter_clean_data(attacked_loader)
+        # Préparer les données
+        images = torch.cat([item[0] for item in val_data]).to(Config.DEVICE)
+        labels = torch.tensor([item[2] for item in val_data]).to(Config.DEVICE) # item[2] is is_adversarial
+        
+        is_poisoned, _ = det_model.detect_poison(images)
+        is_poisoned = is_poisoned.to(Config.DEVICE)
+        
+        correct = (is_poisoned == labels).sum().item()
+        total = len(labels)
+        acc = 100. * correct / total
+        return acc
+
+    acc_sup = evaluate_detector(detector_sup, val_set, "Supervisé")
+    acc_ae = evaluate_detector(detector_ae, val_set, "Auto-Encodeur")
     
-    # Étape 6: Apprentissage fédéré avec données propres
-    print_header("🏥 ÉTAPE 6: APPRENTISSAGE FÉDÉRÉ")
+    print(f"\nPrécision de détection (Accuracy):")
+    print(f"  1. Supervisé (MLP)       : {acc_sup:.2f}%")
+    print(f"  2. Auto-Encodeur (Seuil) : {acc_ae:.2f}%")
     
+    # --- 4. Choix de l'utilisateur ---
+    print("\n" + "="*50)
+    print("🤔 CHOIX DU DÉTECTEUR POUR LA FÉDÉRATION")
+    print("="*50)
+    print("Quel détecteur voulez-vous utiliser pour protéger les hôpitaux ?")
+    print("1: Supervisé (MLP)")
+    print("2: Auto-Encodeur (Non-supervisé)")
+    
+    while True:
+        choice = input("\nVotre choix (1 ou 2): ").strip()
+        if choice == "1":
+            selected_detector = detector_sup
+            print(">> Vous avez choisi: SUPERVISÉ")
+            break
+        elif choice == "2":
+            selected_detector = detector_ae
+            print(">> Vous avez choisi: AUTO-ENCODEUR")
+            break
+        else:
+            print("Choix invalide, réessayez.")
+
+    # Étape 5 & 6: Déploiement du Détecteur et Apprentissage Fédéré
+    print_header("🏥 ÉTAPES 5 & 6: DÉPLOIEMENT ET FÉDÉRATION")
+    print(f"Déploiement du détecteur {choice} (Sélectionné) à l'entrée de chaque hôpital...")
+    
+    # Préparer les sources de données pour chaque hôpital
+    # H1, H2, H4 sont propres (Simulation normale)
+    # H3 est attaqué (Simulation d'attaque)
+    
+    # Pour H3, on doit générer l'attaque MAINTENANT si ce n'est pas fait
+    print("\n[Simulation] Génération de l'attaque sur l'Hôpital 3...")
+    h3_loader = DataLoader(hospital_datasets[2], batch_size=Config.BATCH_SIZE)
+    h3_attacked = AdversarialAttacks.generate_adversarial_dataset(
+        pretrained_model, h3_loader, attack_type='pgd', ratio=0.5
+    )
+    # Convertir H3 en TensorDataset pour faciliter la suite
+    h3_imgs = torch.cat([item[0] for item in h3_attacked])
+    h3_lbls = torch.tensor([item[1].item() for item in h3_attacked])
+    # Note: item[2] est le flag is_adv, on ne l'utilise pas pour le filtrage (c'est le détecteur qui devine)
+    dataset_h3_attacked = TensorDataset(h3_imgs, h3_lbls)
+    
+    # Liste des datasets "bruts" qui arrivent à chaque hôpital
+    raw_datasets_per_hospital = [
+        hospital_datasets[0],      # H1 (Clean)
+        hospital_datasets[1],      # H2 (Clean)
+        dataset_h3_attacked,       # H3 (Attaqué!)
+        hospital_datasets[3]       # H4 (Clean)
+    ]
+    
+    fl_ready_datasets = []
+    
+    for i, raw_ds in enumerate(raw_datasets_per_hospital):
+        print(f"\n🔒 Filtrage Hôpital {i+1}...")
+        
+        # Créer loader temporaire
+        loader = DataLoader(raw_ds, batch_size=Config.BATCH_SIZE, shuffle=False)
+        
+        # Le détecteur filtre (rejette ce qu'il pense être des attaques)
+        clean_data_list = selected_detector.filter_clean_data(loader)
+        
+        # Reconvertir en Dataset pytorch
+        if len(clean_data_list) > 0:
+            c_imgs = torch.stack([item[0] for item in clean_data_list])
+            c_lbls = torch.stack([item[1] for item in clean_data_list])
+            clean_ds = TensorDataset(c_imgs, c_lbls)
+            fl_ready_datasets.append(clean_ds)
+            print(f"  -> Données acceptées pour FL: {len(clean_ds)}/{len(raw_ds)}")
+        else:
+            print(f"  -> ⚠️ TOUTES les données ont été rejetées par le détecteur !")
+    
+    # Lancement du FL
+    print_header("🚀 LANCEMENT DE L'APPRENTISSAGE FÉDÉRÉ")
+    
+    if len(fl_ready_datasets) == 0:
+        print("❌ Erreur: Plus aucune donnée disponible après filtrage.")
+        return
+
     # Créer un nouveau modèle global
     global_model = get_model(pretrained=True)
     
     # Initialiser l'apprentissage fédéré
     fed_learning = FederatedLearning(global_model)
     
-    # Entraîner de manière fédérée
-    final_model = fed_learning.federated_training(hospital_datasets, test_loader=test_loader)
+    # Entraîner de manière fédérée AVEC les données filtrées
+    final_model = fed_learning.federated_training(fl_ready_datasets, test_loader=test_loader)
     
     # Étape 7: Évaluation finale
-    print_header("📊 ÉTAPE 7: ÉVALUATION FINALE")
+    print_header("📊 ÉTAPE 7: ÉVALUATION FINALE DU MODÈLE GLOBAL")
     
     # Évaluer le modèle global
     accuracy = fed_learning.evaluate_global_model(test_loader)
     
-    # Tester la robustesse contre les attaques
-    print("\n🛡️ Test de robustesse contre les attaques...")
-    
-    # Générer des exemples adversariaux sur le test set
-    test_adv_fgsm = []
-    test_adv_pgd = []
-    
-    for images, labels in test_loader:
-        images = images.to(Config.DEVICE)
-        labels = labels.to(Config.DEVICE)
-        
-        # FGSM
-        adv_fgsm = AdversarialAttacks.fgsm_attack(final_model, images, labels)
-        test_adv_fgsm.append((adv_fgsm, labels))
-        
-        # PGD
-        adv_pgd = AdversarialAttacks.pgd_attack(final_model, images, labels)
-        test_adv_pgd.append((adv_pgd, labels))
-    
-    # Évaluer sur les données adversariales
-    print("\nÉvaluation sur données originales:")
-    print(f"  Accuracy: {accuracy:.2f}%")
-    
     # Sauvegarder les modèles
-    print_header("💾 SAUVEGARDE DES MODÈLES")
-    fed_learning.save_global_model("global_model_final.pth")
+    print_header("💾 SAUVEGARDE DES RESULTATS")
     
-    print_header("✅ PROCESSUS TERMINÉ AVEC SUCCÈS")
-    print("Fichiers générés:")
-    print("  - poison_detector.pth")
-    print("  - global_model_final.pth")
-    print("\nVous pouvez maintenant utiliser ces modèles pour:")
-    print("  1. Détecter les attaques adversariales")
-    print("  2. Classifier les radiographies thoraciques")
-    print("  3. Poursuivre l'entraînement fédéré")
+    if choice == "1":
+        global_model_name = "global_model_supervised.pth"
+    else:
+        global_model_name = "global_model_autoencoder.pth"
+        
+    fed_learning.save_global_model(global_model_name)
+    
+    print_header("✅ PROCESSUS COMPLET TERMINÉ")
+    print("Résumé:")
+    print("1. Détecteurs générés et comparés.")
+    print("2. Détecteur choisi déployé sur TOUS les hôpitaux.")
+    print("3. Hôpital 3 (Attaqué) a été filtré.")
+    print("4. Hôpitaux 1, 2, 4 (Sains) ont été vérifiés.")
+    print(f"5. Apprentissage Fédéré exécuté sur les données validées.")
+    print(f"6. Modèle global sauvegardé sous: {global_model_name}")
 
 if __name__ == "__main__":
     main()

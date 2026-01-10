@@ -35,8 +35,9 @@ goto menu
 
 :train
 echo.
-echo Lancement de l'entrainement...
+echo Lancement de l'entrainement et de la comparaison...
 python main.py
+echo Fin.
 pause
 goto menu
 

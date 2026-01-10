@@ -74,3 +74,40 @@ def get_poison_detector(input_dim=512):
     """Créer et retourner le détecteur de poison"""
     detector = PoisonDetectionModel(input_dim=input_dim)
     return detector.to(Config.DEVICE)
+
+class AutoEncoder(nn.Module):
+    """
+    AutoEncodeur Convolutionnel pour la détection d'anomalies (attaques)
+    """
+    def __init__(self):
+        super(AutoEncoder, self).__init__()
+        
+        # Encoder
+        self.encoder = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1),  # 224 -> 112
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1), # 112 -> 56
+            nn.ReLU(),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1), # 56 -> 28
+            nn.ReLU()
+        )
+        
+        # Decoder
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1), # 28 -> 56
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1), # 56 -> 112
+            nn.ReLU(),
+            nn.ConvTranspose2d(32, 3, kernel_size=3, stride=2, padding=1, output_padding=1),  # 112 -> 224
+            nn.Sigmoid() # Pour avoir des valeurs entre 0 et 1 comme les images normalisées
+        )
+
+    def forward(self, x):
+        x = self.encoder(x)
+        x = self.decoder(x)
+        return x
+
+def get_autoencoder():
+    """Créer et retourner l'AutoEncodeur"""
+    model = AutoEncoder()
+    return model.to(Config.DEVICE)
