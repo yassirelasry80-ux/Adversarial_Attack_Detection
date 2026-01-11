@@ -13,14 +13,18 @@ class Config:
     NUM_CLASSES = 2
     IMG_SIZE = 224
     BATCH_SIZE = 32       # OK pour RTX 4060 8GB
-    EPOCHS = 12
+    EPOCHS = 20
     LEARNING_RATE = 1e-3
+    
+    # Paramètres d'entraînement du détecteur
+    DETECTOR_EPOCHS = 20
 
     # -------------------------
     # Fédéré (optionnel)
     # -------------------------
     NUM_HOSPITALS = 4
-    FEDERATED_ROUNDS = 5
+    FEDERATED_ROUNDS = 20
+    LOCAL_EPOCHS = 4
 
     # -------------------------
     # Attaques adversariales
@@ -33,7 +37,7 @@ class Config:
     # -------------------------
     # Détection adversariale
     # -------------------------
-    DETECTION_THRESHOLD = 0.70  # 🔥 CLÉ DU PROBLÈME
+    DETECTION_THRESHOLD = 0.6  # 🔥 CLÉ DU PROBLÈME
 
     # -------------------------
     # Matériel

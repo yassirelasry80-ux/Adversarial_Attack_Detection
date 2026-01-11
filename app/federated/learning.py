@@ -120,7 +120,7 @@ class FederatedLearning:
                 local_model = self.train_local_model(
                     local_model, 
                     dataloader, 
-                    epochs=3
+                    epochs=Config.LOCAL_EPOCHS
                 )
                 
                 local_models.append(local_model)

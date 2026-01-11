@@ -12,18 +12,22 @@ REM Menu
 echo.
 echo Que voulez-vous faire?
 echo 1. Telecharger le dataset
-echo 2. Lancer l'entrainement complet
-echo 3. Tester l'inference
-echo 4. Interface Graphique (Streamlit)
-echo 5. Quitter
+echo 2. Entrainer les Detecteurs (UNE SEULE FOIS)
+echo 3. Lancer Federated Learning (Approche Supervisee)
+echo 4. Lancer Federated Learning (Approche Auto-Encodeur)
+echo 5. Tester l'inference
+echo 6. Interface Graphique (Streamlit)
+echo 7. Quitter
 echo.
-set /p choice="Votre choix (1-5): "
+set /p choice="Votre choix (1-7): "
 
 if "%choice%"=="1" goto download
-if "%choice%"=="2" goto train
-if "%choice%"=="3" goto inference
-if "%choice%"=="4" goto streamlit
-if "%choice%"=="5" goto end
+if "%choice%"=="2" goto train_detectors
+if "%choice%"=="3" goto fl_supervised
+if "%choice%"=="4" goto fl_autoencoder
+if "%choice%"=="5" goto inference
+if "%choice%"=="6" goto streamlit
+if "%choice%"=="7" goto end
 goto menu
 
 :download
@@ -33,11 +37,25 @@ python -m app.data.downloader
 pause
 goto menu
 
-:train
+:train_detectors
 echo.
-echo Lancement de l'entrainement et de la comparaison...
-python main.py
-echo Fin.
+echo === ENTRAINEMENT DES DETECTEURS ===
+echo Cela va prendre du temps...
+python main.py --step train_detectors
+pause
+goto menu
+
+:fl_supervised
+echo.
+echo === FEDERATED LEARNING (SUPERVISE) ===
+python main.py --step federated --method supervised
+pause
+goto menu
+
+:fl_autoencoder
+echo.
+echo === FEDERATED LEARNING (AUTO-ENCODEUR) ===
+python main.py --step federated --method autoencoder
 pause
 goto menu
 
